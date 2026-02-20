@@ -1,6 +1,6 @@
 # peek
 
-Identify and name images from the terminal using vision LLMs.
+Describe and rename images from the terminal using vision LLMs.
 
 ## Install
 
@@ -13,19 +13,41 @@ Requires `OPENROUTER_API_KEY` environment variable ([get one](https://openrouter
 ## Usage
 
 ```bash
-peek photo.png                              # identify with defaults
-peek screenshot.png -m qwen72b -d detailed  # detailed with larger model
-peek ui.png -c "iOS settings screen"        # with context hint
-peek chart.png -d brief                     # brief description
-peek image.png --name-only                  # just the name
-peek --list-models                          # show supported models
+# Describe a single image
+peek photo.png
+
+# Detailed description with a larger model
+peek shot.png -m qwen72b -d detailed
+
+# With context hint
+peek ui.png -c "iOS settings screen"
+
+# Brief description
+peek chart.png -d brief
+
+# Just the name (no description)
+peek image.png --name-only
+
+# List available models
+peek --list-models
 ```
 
 Piped output is tab-separated (`name\tdescription`):
 
 ```bash
-peek image.png | cut -f1                           # just the name
-mv "ugly.png" "$(peek ugly.png --name-only).png"   # rename with peek
+peek image.png | cut -f1    # just the name
+peek image.png | cut -f2    # just the description
+```
+
+## Directory Mode
+
+Pass a directory to batch-rename files using vision. Rename and timestamp context are enabled by default.
+
+```bash
+peek ./screenshots                  # rename all images in dir
+peek ./screenshots --no-rename      # describe only, no rename
+peek ./images -r -j 4               # parallel recursive
+peek ./photos --no-timestamp-context  # skip timestamp/neighbor context
 ```
 
 ## Options
@@ -37,6 +59,10 @@ mv "ugly.png" "$(peek ugly.png --name-only).png"   # rename with peek
 | `-c, --context <text>` | Context to guide the description | |
 | `--name-only` | Print only the name | |
 | `--list-models` | List supported models | |
+| `-r, --recursive` | Recurse into subdirectories | |
+| `-j, --jobs <n>` | Parallel jobs | `1` |
+| `--no-rename` | Don't rename files (describe only) | |
+| `--no-timestamp-context` | Skip timestamp/neighbor context | |
 
 ## Models
 
