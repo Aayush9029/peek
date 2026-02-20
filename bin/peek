@@ -1,0 +1,306 @@
+#!/bin/bash
+#***************************************************************************
+#*** peek - describe images from the terminal using vision LLMs
+#***************************************************************************
+
+VERSION="0.1.0"
+
+#***** color scheme *****
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+BLUE='\033[1;34m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+#***** set defaults *****
+DEFAULT_MODEL="qwen32b"
+DEFAULT_DETAIL="normal"
+CONTEXT=""
+
+#***** model lookup (bash 3.2 compatible) *****
+resolve_model_id() {
+    case "$1" in
+        qwen32b)  echo "qwen/qwen2.5-vl-32b-instruct" ;;
+        qwen72b)  echo "qwen/qwen2.5-vl-72b-instruct" ;;
+        llama11b) echo "meta-llama/llama-3.2-11b-vision-instruct" ;;
+        gemma12b) echo "google/gemma-3-12b-it" ;;
+        *)        return 1 ;;
+    esac
+}
+
+#***** detail prompt lookup *****
+resolve_detail_prompt() {
+    case "$1" in
+        brief)    echo "Describe this image in 1-2 concise sentences." ;;
+        normal)   echo "Describe this image in a short paragraph, covering the key elements." ;;
+        detailed) echo "Provide a comprehensive description of this image, including details about composition, colors, text, objects, and context." ;;
+        *)        return 1 ;;
+    esac
+}
+
+#***** helper functions *****
+print_header() {
+    echo -e "${CYAN}${BOLD}👁 peek${RESET}"
+}
+
+print_success() {
+    echo -e "${GREEN}✓${RESET} $1"
+}
+
+print_error() {
+    echo -e "${RED}✗${RESET} $1"
+}
+
+print_status() {
+    echo -e "  ${GREEN}→${RESET} $1"
+}
+
+print_dim() {
+    echo -e "  ${DIM}$1${RESET}"
+}
+
+#***** show help *****
+function show_help() {
+    echo
+    print_header
+    echo -e "  ${DIM}describe images using vision LLMs${RESET}"
+    echo
+    echo -e "${BLUE}USAGE${RESET}"
+    echo -e "    peek <image-path> [options]"
+    echo
+    echo -e "${BLUE}OPTIONS${RESET}"
+    echo -e "    -h, --help              Show this help"
+    echo -e "    -v, --version           Show version"
+    echo -e "    -m, --model <name>      Model shorthand (default: $DEFAULT_MODEL)"
+    echo -e "    -d, --detail <level>    brief | normal | detailed (default: $DEFAULT_DETAIL)"
+    echo -e "    -c, --context <text>    Context to guide the description"
+    echo -e "    --list-models           List supported models"
+    echo
+    echo -e "${BLUE}EXAMPLES${RESET}"
+    echo -e "    ${DIM}peek photo.png${RESET}                          ${DIM}# describe with defaults${RESET}"
+    echo -e "    ${DIM}peek shot.png -m qwen72b -d detailed${RESET}    ${DIM}# detailed with qwen 72B${RESET}"
+    echo -e "    ${DIM}peek ui.png -c \"iOS settings screen\"${RESET}    ${DIM}# with context hint${RESET}"
+    echo -e "    ${DIM}peek chart.png -d brief${RESET}                 ${DIM}# brief description${RESET}"
+    echo
+    echo -e "${DIM}Requires OPENROUTER_API_KEY environment variable.${RESET}"
+    echo
+    exit 0
+}
+
+#***** show version *****
+function show_version() {
+    echo "peek $VERSION"
+    exit 0
+}
+
+#***** list models *****
+function list_models() {
+    echo
+    print_header
+    echo
+    echo -e "${BLUE}SUPPORTED MODELS${RESET}"
+    echo
+    echo -e "    ${BOLD}Shorthand     Model ID${RESET}"
+    echo -e "    ${DIM}─────────     ────────────────────────────────────────${RESET}"
+    echo -e "    qwen32b       qwen/qwen2.5-vl-32b-instruct ${DIM}(default)${RESET}"
+    echo -e "    qwen72b       qwen/qwen2.5-vl-72b-instruct"
+    echo -e "    llama11b      meta-llama/llama-3.2-11b-vision-instruct"
+    echo -e "    gemma12b      google/gemma-3-12b-it"
+    echo
+    exit 0
+}
+
+#***** parse arguments *****
+model="$DEFAULT_MODEL"
+detail="$DEFAULT_DETAIL"
+image_path=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            ;;
+        -v|--version)
+            show_version
+            ;;
+        --list-models)
+            list_models
+            ;;
+        -m|--model)
+            if [[ -z "$2" ]]; then
+                print_error "--model requires a model name"
+                exit 1
+            fi
+            model="$2"
+            shift 2
+            ;;
+        -d|--detail)
+            if [[ -z "$2" ]]; then
+                print_error "--detail requires a level (brief, normal, detailed)"
+                exit 1
+            fi
+            detail="$2"
+            shift 2
+            ;;
+        -c|--context)
+            if [[ -z "$2" ]]; then
+                print_error "--context requires text"
+                exit 1
+            fi
+            CONTEXT="$2"
+            shift 2
+            ;;
+        -*)
+            print_error "Unknown option: $1"
+            echo -e "${DIM}Use 'peek --help' for usage${RESET}"
+            exit 1
+            ;;
+        *)
+            if [[ -z "$image_path" ]]; then
+                image_path="$1"
+                shift
+            else
+                print_error "Unexpected argument: $1"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+#***** validate inputs *****
+if [[ -z "$image_path" ]]; then
+    print_error "No image path provided"
+    echo -e "${DIM}Usage: peek <image-path> [options]${RESET}"
+    exit 1
+fi
+
+if [[ ! -f "$image_path" ]]; then
+    print_error "File not found: $image_path"
+    exit 1
+fi
+
+model_id=$(resolve_model_id "$model")
+if [[ $? -ne 0 ]]; then
+    print_error "Unknown model: $model"
+    echo -e "${DIM}Use 'peek --list-models' to see available models${RESET}"
+    exit 1
+fi
+
+system_prompt=$(resolve_detail_prompt "$detail")
+if [[ $? -ne 0 ]]; then
+    print_error "Unknown detail level: $detail (use brief, normal, or detailed)"
+    exit 1
+fi
+
+if [[ -z "$OPENROUTER_API_KEY" ]]; then
+    print_error "OPENROUTER_API_KEY environment variable not set"
+    echo -e "${DIM}Get a key at https://openrouter.ai/keys${RESET}"
+    exit 1
+fi
+
+#***** detect MIME type *****
+mime_type=$(file --mime-type -b "$image_path")
+case "$mime_type" in
+    image/png|image/jpeg|image/gif|image/webp) ;;
+    *)
+        print_error "Unsupported image type: $mime_type"
+        exit 1
+        ;;
+esac
+
+#***** print header (only in interactive mode) *****
+if [[ -t 1 ]]; then
+    echo
+    print_header
+    print_dim "v${VERSION} · https://github.com/Aayush9029/peek"
+    echo
+    print_status "Image: ${BOLD}$(basename "$image_path")${RESET}"
+    print_status "Model: ${BOLD}${model}${RESET} ${DIM}(${model_id})${RESET}"
+    print_status "Detail: ${BOLD}${detail}${RESET}"
+    [[ -n "$CONTEXT" ]] && print_status "Context: ${BOLD}${CONTEXT}${RESET}"
+    echo
+fi
+
+#***** add context to prompt *****
+if [[ -n "$CONTEXT" ]]; then
+    system_prompt="${system_prompt} Context: ${CONTEXT}"
+fi
+
+#***** encode image *****
+base64_data=$(base64 -i "$image_path")
+
+#***** build JSON payload *****
+json_payload=$(python3 -c "
+import json, sys
+payload = {
+    'model': sys.argv[1],
+    'messages': [{
+        'role': 'user',
+        'content': [
+            {'type': 'text', 'text': sys.argv[2]},
+            {'type': 'image_url', 'image_url': {'url': 'data:' + sys.argv[3] + ';base64,' + sys.argv[4]}}
+        ]
+    }],
+    'max_tokens': 1024
+}
+print(json.dumps(payload))
+" "$model_id" "$system_prompt" "$mime_type" "$base64_data")
+
+#***** call OpenRouter API *****
+if [[ -t 1 ]]; then
+    echo -ne "  ${YELLOW}⏳${RESET} Thinking..."
+fi
+
+response=$(curl -s -w "\n%{http_code}" \
+    -X POST "https://openrouter.ai/api/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+    -d "$json_payload")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ -t 1 ]]; then
+    echo -ne "\r\033[K"
+fi
+
+#***** parse response *****
+if [[ "$http_code" -ne 200 ]]; then
+    error_msg=$(echo "$body" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    msg = data.get('error', {}).get('message', 'Unknown error')
+    print(msg)
+except:
+    print('HTTP $http_code')
+" 2>/dev/null)
+    print_error "API error: $error_msg"
+    exit 1
+fi
+
+description=$(echo "$body" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(data['choices'][0]['message']['content'])
+except Exception as e:
+    print(f'Failed to parse response: {e}', file=sys.stderr)
+    sys.exit(1)
+")
+
+if [[ $? -ne 0 ]]; then
+    print_error "Failed to parse API response"
+    exit 1
+fi
+
+#***** output *****
+if [[ -t 1 ]]; then
+    echo -e "  $description"
+    echo
+else
+    echo "$description"
+fi
