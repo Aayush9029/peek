@@ -3,7 +3,7 @@
 #*** peek - describe images from the terminal using vision LLMs
 #***************************************************************************
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 #***** color scheme *****
 GREEN='\033[1;32m'
@@ -20,6 +20,10 @@ DEFAULT_MODEL="qwen32b"
 DEFAULT_DETAIL="normal"
 CONTEXT=""
 NAME_ONLY=false
+RENAME=false
+RECURSIVE=false
+TIMESTAMP_CONTEXT=false
+PARALLEL_JOBS=1
 
 #***** model lookup (bash 3.2 compatible) *****
 resolve_model_id() {
@@ -52,7 +56,7 @@ print_success() {
 }
 
 print_error() {
-    echo -e "${RED}✗${RESET} $1"
+    echo -e "${RED}✗${RESET} $1" >&2
 }
 
 print_status() {
@@ -63,6 +67,21 @@ print_dim() {
     echo -e "  ${DIM}$1${RESET}"
 }
 
+#***** progress bar *****
+print_progress() {
+    local current=$1
+    local total=$2
+    local name="$3"
+    local width=30
+    local pct=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    printf "\r  ${YELLOW}%s${RESET} ${DIM}%d/%d${RESET} %s" "$bar" "$current" "$total" "$name" >&2
+}
+
 #***** show help *****
 function show_help() {
     echo
@@ -70,24 +89,29 @@ function show_help() {
     echo -e "  ${DIM}describe images using vision LLMs${RESET}"
     echo
     echo -e "${BLUE}USAGE${RESET}"
-    echo -e "    peek <image-path> [options]"
+    echo -e "    peek <image-or-dir> [options]"
     echo
     echo -e "${BLUE}OPTIONS${RESET}"
-    echo -e "    -h, --help              Show this help"
-    echo -e "    -v, --version           Show version"
-    echo -e "    -m, --model <name>      Model shorthand (default: $DEFAULT_MODEL)"
-    echo -e "    -d, --detail <level>    brief | normal | detailed (default: $DEFAULT_DETAIL)"
-    echo -e "    -c, --context <text>    Context to guide the description"
-    echo -e "    --name-only             Print only the name (no description)"
-    echo -e "    --list-models           List supported models"
+    echo -e "    -h, --help                Show this help"
+    echo -e "    -v, --version             Show version"
+    echo -e "    -m, --model <name>        Model shorthand (default: $DEFAULT_MODEL)"
+    echo -e "    -d, --detail <level>      brief | normal | detailed (default: $DEFAULT_DETAIL)"
+    echo -e "    -c, --context <text>      Context to guide the description"
+    echo -e "    --name-only               Print only the name (no description)"
+    echo -e "    --list-models             List supported models"
+    echo
+    echo -e "${BLUE}DIRECTORY OPTIONS${RESET}"
+    echo -e "    -r, --recursive           Recurse into subdirectories"
+    echo -e "    -j, --jobs <n>            Parallel jobs (default: 1)"
+    echo -e "    --rename                  Rename files to their peek names"
+    echo -e "    --timestamp-context       Auto-add timestamp and neighbor context"
     echo
     echo -e "${BLUE}EXAMPLES${RESET}"
-    echo -e "    ${DIM}peek photo.png${RESET}                          ${DIM}# describe with defaults${RESET}"
-    echo -e "    ${DIM}peek shot.png -m qwen72b -d detailed${RESET}    ${DIM}# detailed with qwen 72B${RESET}"
-    echo -e "    ${DIM}peek ui.png -c \"iOS settings screen\"${RESET}    ${DIM}# with context hint${RESET}"
-    echo -e "    ${DIM}peek chart.png -d brief${RESET}                 ${DIM}# brief description${RESET}"
-    echo -e "    ${DIM}peek image.png --name-only${RESET}              ${DIM}# just the name${RESET}"
-    echo -e "    ${DIM}peek image.png | cut -f1${RESET}                ${DIM}# name from piped output${RESET}"
+    echo -e "    ${DIM}peek photo.png${RESET}                                  ${DIM}# describe single image${RESET}"
+    echo -e "    ${DIM}peek shot.png -m qwen72b -d detailed${RESET}            ${DIM}# detailed with qwen 72B${RESET}"
+    echo -e "    ${DIM}peek ui.png -c \"iOS settings screen\"${RESET}            ${DIM}# with context hint${RESET}"
+    echo -e "    ${DIM}peek ./screenshots --rename --timestamp-context${RESET}  ${DIM}# rename a directory${RESET}"
+    echo -e "    ${DIM}peek ./images -r -j 4 --name-only${RESET}              ${DIM}# parallel recursive${RESET}"
     echo
     echo -e "${DIM}Requires OPENROUTER_API_KEY environment variable.${RESET}"
     echo
@@ -117,10 +141,138 @@ function list_models() {
     exit 0
 }
 
+#***** process a single image (core logic) *****
+process_image() {
+    local image_path="$1"
+    local model_id="$2"
+    local system_prompt="$3"
+    local extra_context="$4"
+
+    #-- detect MIME type --
+    local mime_type
+    mime_type=$(file --mime-type -b "$image_path")
+    case "$mime_type" in
+        image/png|image/jpeg|image/gif|image/webp) ;;
+        *)
+            print_error "Unsupported image type: $mime_type ($image_path)"
+            return 1
+            ;;
+    esac
+
+    #-- build full prompt --
+    local full_prompt="$system_prompt"
+    if [[ -n "$extra_context" ]]; then
+        full_prompt="${full_prompt} Context: ${extra_context}"
+    fi
+
+    #-- build JSON payload to temp file --
+    local payload_file
+    payload_file=$(mktemp)
+
+    base64 -i "$image_path" | python3 -c "
+import json, sys
+b64 = sys.stdin.read().replace('\n', '')
+payload = {
+    'model': sys.argv[1],
+    'messages': [{
+        'role': 'user',
+        'content': [
+            {'type': 'text', 'text': sys.argv[2]},
+            {'type': 'image_url', 'image_url': {'url': 'data:' + sys.argv[3] + ';base64,' + b64}}
+        ]
+    }],
+    'max_tokens': 1024,
+    'provider': {'allow_fallbacks': True}
+}
+print(json.dumps(payload))
+" "$model_id" "$full_prompt" "$mime_type" > "$payload_file"
+
+    #-- call OpenRouter API --
+    local response http_code body
+    response=$(curl -s -w "\n%{http_code}" \
+        -X POST "https://openrouter.ai/api/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+        -d @"$payload_file")
+
+    rm -f "$payload_file"
+
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+
+    #-- parse response --
+    if [[ "$http_code" -ne 200 ]]; then
+        local error_msg
+        error_msg=$(echo "$body" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    msg = data.get('error', {}).get('message', 'Unknown error')
+    print(msg)
+except:
+    print('HTTP $http_code')
+" 2>/dev/null)
+        print_error "API error: $error_msg ($image_path)"
+        return 1
+    fi
+
+    local parsed
+    parsed=$(echo "$body" | python3 -c "
+import json, re, sys
+try:
+    data = json.load(sys.stdin)
+    content = data['choices'][0]['message']['content']
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        m = re.search(r'\`\`\`(?:json)?\s*(\{.*?\})\s*\`\`\`', content, re.DOTALL)
+        if m:
+            result = json.loads(m.group(1))
+        else:
+            m = re.search(r'\{.*\}', content, re.DOTALL)
+            if m:
+                result = json.loads(m.group(0))
+            else:
+                print(f'No JSON found in response', file=sys.stderr)
+                sys.exit(1)
+    name = result.get('name', '').strip()
+    description = result.get('description', '').strip()
+    if not name or not description:
+        print('Missing name or description in response', file=sys.stderr)
+        sys.exit(1)
+    print(name)
+    print(description)
+except Exception as e:
+    print(f'Failed to parse response: {e}', file=sys.stderr)
+    sys.exit(1)
+")
+
+    if [[ $? -ne 0 ]]; then
+        print_error "Failed to parse API response ($image_path)"
+        return 1
+    fi
+
+    local peek_name peek_description
+    peek_name=$(echo "$parsed" | head -1)
+    peek_description=$(echo "$parsed" | tail -n +2)
+
+    #-- output --
+    if [[ "$NAME_ONLY" == true ]]; then
+        echo "$peek_name"
+    elif [[ -t 1 ]]; then
+        echo -e "  ${BOLD}Name:${RESET} $peek_name"
+        echo -e "  ${BOLD}Description:${RESET} $peek_description"
+    else
+        printf '%s\t%s\n' "$peek_name" "$peek_description"
+    fi
+
+    return 0
+}
+
 #***** parse arguments *****
 model="$DEFAULT_MODEL"
 detail="$DEFAULT_DETAIL"
-image_path=""
+target_path=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -136,6 +288,27 @@ while [[ $# -gt 0 ]]; do
         --name-only)
             NAME_ONLY=true
             shift
+            ;;
+        --rename)
+            RENAME=true
+            NAME_ONLY=true
+            shift
+            ;;
+        --recursive|-r)
+            RECURSIVE=true
+            shift
+            ;;
+        --timestamp-context)
+            TIMESTAMP_CONTEXT=true
+            shift
+            ;;
+        -j|--jobs)
+            if [[ -z "$2" ]]; then
+                print_error "--jobs requires a number"
+                exit 1
+            fi
+            PARALLEL_JOBS="$2"
+            shift 2
             ;;
         -m|--model)
             if [[ -z "$2" ]]; then
@@ -163,12 +336,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         -*)
             print_error "Unknown option: $1"
-            echo -e "${DIM}Use 'peek --help' for usage${RESET}"
+            echo -e "${DIM}Use 'peek --help' for usage${RESET}" >&2
             exit 1
             ;;
         *)
-            if [[ -z "$image_path" ]]; then
-                image_path="$1"
+            if [[ -z "$target_path" ]]; then
+                target_path="$1"
                 shift
             else
                 print_error "Unexpected argument: $1"
@@ -179,21 +352,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 #***** validate inputs *****
-if [[ -z "$image_path" ]]; then
-    print_error "No image path provided"
-    echo -e "${DIM}Usage: peek <image-path> [options]${RESET}"
-    exit 1
-fi
-
-if [[ ! -f "$image_path" ]]; then
-    print_error "File not found: $image_path"
+if [[ -z "$target_path" ]]; then
+    print_error "No image or directory path provided"
+    echo -e "${DIM}Usage: peek <image-or-dir> [options]${RESET}" >&2
     exit 1
 fi
 
 model_id=$(resolve_model_id "$model")
 if [[ $? -ne 0 ]]; then
     print_error "Unknown model: $model"
-    echo -e "${DIM}Use 'peek --list-models' to see available models${RESET}"
+    echo -e "${DIM}Use 'peek --list-models' to see available models${RESET}" >&2
     exit 1
 fi
 
@@ -205,140 +373,280 @@ fi
 
 if [[ -z "$OPENROUTER_API_KEY" ]]; then
     print_error "OPENROUTER_API_KEY environment variable not set"
-    echo -e "${DIM}Get a key at https://openrouter.ai/keys${RESET}"
+    echo -e "${DIM}Get a key at https://openrouter.ai/keys${RESET}" >&2
     exit 1
 fi
 
-#***** detect MIME type *****
-mime_type=$(file --mime-type -b "$image_path")
-case "$mime_type" in
-    image/png|image/jpeg|image/gif|image/webp) ;;
-    *)
-        print_error "Unsupported image type: $mime_type"
-        exit 1
-        ;;
-esac
+#***** single file mode *****
+if [[ -f "$target_path" ]]; then
+    if [[ -t 1 ]]; then
+        echo
+        print_header
+        print_dim "v${VERSION} · https://github.com/Aayush9029/peek"
+        echo
+        print_status "Image: ${BOLD}$(basename "$target_path")${RESET}"
+        print_status "Model: ${BOLD}${model}${RESET} ${DIM}(${model_id})${RESET}"
+        print_status "Detail: ${BOLD}${detail}${RESET}"
+        [[ -n "$CONTEXT" ]] && print_status "Context: ${BOLD}${CONTEXT}${RESET}"
+        echo
+        echo -ne "  ${YELLOW}⏳${RESET} Thinking..."
+    fi
 
-#***** print header (only in interactive mode) *****
+    extra_context="$CONTEXT"
+    result=$(process_image "$target_path" "$model_id" "$system_prompt" "$extra_context")
+    exit_code=$?
+
+    if [[ -t 1 ]]; then
+        echo -ne "\r\033[K"
+    fi
+
+    if [[ $exit_code -eq 0 ]]; then
+        echo "$result"
+
+        #-- rename if requested --
+        if [[ "$RENAME" == true && -n "$result" ]]; then
+            safe=$(echo "$result" | head -1 | sed 's/\x1b\[[0-9;]*m//g' | LC_ALL=C tr -dc 'a-zA-Z0-9 _-' | sed 's/^ *//;s/ *$//' | tr ' ' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-80)
+            if [[ -n "$safe" ]]; then
+                ext="${target_path##*.}"
+                dir=$(dirname "$target_path")
+                newpath="${dir}/${safe}.${ext}"
+                if [[ "$newpath" != "$target_path" ]]; then
+                    # handle duplicates
+                    if [[ -f "$newpath" ]]; then
+                        i=2
+                        while [[ -f "${dir}/${safe}-${i}.${ext}" ]]; do
+                            i=$((i+1))
+                        done
+                        newpath="${dir}/${safe}-${i}.${ext}"
+                    fi
+                    mv "$target_path" "$newpath"
+                    if [[ -t 1 ]]; then
+                        print_success "Renamed → $(basename "$newpath")"
+                        echo
+                    fi
+                fi
+            fi
+        elif [[ -t 1 ]]; then
+            echo
+        fi
+    fi
+    exit $exit_code
+fi
+
+#***** directory mode *****
+if [[ ! -d "$target_path" ]]; then
+    print_error "Not a file or directory: $target_path"
+    exit 1
+fi
+
+# collect image files
+image_files=()
+if [[ "$RECURSIVE" == true ]]; then
+    while IFS= read -r -d '' f; do
+        image_files+=("$f")
+    done < <(find "$target_path" -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.gif" -o -iname "*.webp" \) -print0 | sort -z)
+else
+    while IFS= read -r -d '' f; do
+        image_files+=("$f")
+    done < <(find "$target_path" -maxdepth 1 -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.gif" -o -iname "*.webp" \) -print0 | sort -z)
+fi
+
+total=${#image_files[@]}
+if [[ $total -eq 0 ]]; then
+    print_error "No images found in $target_path"
+    exit 1
+fi
+
+# build timestamp map for --timestamp-context
+declare -a file_timestamps
+if [[ "$TIMESTAMP_CONTEXT" == true ]]; then
+    for ((i=0; i<total; i++)); do
+        file_timestamps[$i]=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "${image_files[$i]}" 2>/dev/null)
+    done
+fi
+
 if [[ -t 1 ]]; then
     echo
     print_header
     print_dim "v${VERSION} · https://github.com/Aayush9029/peek"
     echo
-    print_status "Image: ${BOLD}$(basename "$image_path")${RESET}"
+    print_status "Directory: ${BOLD}${target_path}${RESET}"
+    print_status "Images: ${BOLD}${total}${RESET}"
     print_status "Model: ${BOLD}${model}${RESET} ${DIM}(${model_id})${RESET}"
-    print_status "Detail: ${BOLD}${detail}${RESET}"
-    [[ -n "$CONTEXT" ]] && print_status "Context: ${BOLD}${CONTEXT}${RESET}"
+    print_status "Jobs: ${BOLD}${PARALLEL_JOBS}${RESET}"
+    [[ "$RENAME" == true ]] && print_status "Mode: ${BOLD}rename${RESET}"
+    [[ "$TIMESTAMP_CONTEXT" == true ]] && print_status "Timestamp context: ${BOLD}enabled${RESET}"
     echo
 fi
 
-#***** add context to prompt *****
-if [[ -n "$CONTEXT" ]]; then
-    system_prompt="${system_prompt} Context: ${CONTEXT}"
-fi
+#***** process single image in directory mode *****
+process_dir_image() {
+    local idx=$1
+    local f="${image_files[$idx]}"
+    local basename_f
+    basename_f=$(basename "$f")
 
-#***** encode image *****
-base64_data=$(base64 -i "$image_path")
+    # build context
+    local extra_context="$CONTEXT"
 
-#***** build JSON payload *****
-json_payload=$(python3 -c "
-import json, sys
-payload = {
-    'model': sys.argv[1],
-    'messages': [{
-        'role': 'user',
-        'content': [
-            {'type': 'text', 'text': sys.argv[2]},
-            {'type': 'image_url', 'image_url': {'url': 'data:' + sys.argv[3] + ';base64,' + sys.argv[4]}}
-        ]
-    }],
-    'max_tokens': 1024,
-    'provider': {'allow_fallbacks': True}
+    if [[ "$TIMESTAMP_CONTEXT" == true ]]; then
+        local ts="${file_timestamps[$idx]}"
+        local ts_ctx="Screenshot taken at ${ts}."
+
+        # gather neighbors (within 2 indices)
+        local neighbors=""
+        for ((j=idx-2; j<=idx+2; j++)); do
+            if [[ $j -ge 0 && $j -lt $total && $j -ne $idx ]]; then
+                local nname
+                nname=$(basename "${image_files[$j]}")
+                local nts="${file_timestamps[$j]}"
+                neighbors="${neighbors}${nts} ${nname}, "
+            fi
+        done
+
+        ts_ctx="${ts_ctx}"
+        if [[ -n "$neighbors" ]]; then
+            ts_ctx="${ts_ctx} Nearby screenshots: ${neighbors%, }"
+        fi
+
+        if [[ -n "$extra_context" ]]; then
+            extra_context="${extra_context}. ${ts_ctx}"
+        else
+            extra_context="$ts_ctx"
+        fi
+    fi
+
+    local result
+    result=$(process_image "$f" "$model_id" "$system_prompt" "$extra_context")
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        echo "FAIL	${f}" >> "$results_file"
+        return 1
+    fi
+
+    local peek_name
+    peek_name=$(echo "$result" | head -1)
+
+    # rename if requested
+    if [[ "$RENAME" == true && -n "$peek_name" ]]; then
+        local safe
+        safe=$(echo "$peek_name" | sed 's/\x1b\[[0-9;]*m//g' | LC_ALL=C tr -dc 'a-zA-Z0-9 _-' | sed 's/^ *//;s/ *$//' | tr ' ' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-80)
+        if [[ -n "$safe" ]]; then
+            local ext="${f##*.}"
+            local dir
+            dir=$(dirname "$f")
+            local newpath="${dir}/${safe}.${ext}"
+            if [[ "$newpath" != "$f" ]]; then
+                # handle duplicates
+                if [[ -f "$newpath" ]]; then
+                    local i=2
+                    while [[ -f "${dir}/${safe}-${i}.${ext}" ]]; do
+                        i=$((i+1))
+                    done
+                    newpath="${dir}/${safe}-${i}.${ext}"
+                fi
+                mv "$f" "$newpath"
+                echo "RENAME	$(basename "$f")	$(basename "$newpath")" >> "$results_file"
+            else
+                echo "SAME	$(basename "$f")" >> "$results_file"
+            fi
+        fi
+    else
+        echo "OK	${f}	${result}" >> "$results_file"
+    fi
 }
-print(json.dumps(payload))
-" "$model_id" "$system_prompt" "$mime_type" "$base64_data")
 
-#***** call OpenRouter API *****
-if [[ -t 1 ]]; then
-    echo -ne "  ${YELLOW}⏳${RESET} Thinking..."
-fi
+# results tracking
+results_file=$(mktemp)
+trap "rm -f '$results_file'" EXIT
 
-response=$(curl -s -w "\n%{http_code}" \
-    -X POST "https://openrouter.ai/api/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-    -d "$json_payload")
+completed=0
+failed=0
 
-http_code=$(echo "$response" | tail -1)
-body=$(echo "$response" | sed '$d')
+if [[ $PARALLEL_JOBS -gt 1 ]]; then
+    #***** parallel processing *****
+    active_pids=()
 
-if [[ -t 1 ]]; then
-    echo -ne "\r\033[K"
-fi
+    for ((idx=0; idx<total; idx++)); do
+        # wait if we've hit the job limit
+        while [[ ${#active_pids[@]} -ge $PARALLEL_JOBS ]]; do
+            # wait for any one to finish
+            for p_idx in "${!active_pids[@]}"; do
+                if ! kill -0 "${active_pids[$p_idx]}" 2>/dev/null; then
+                    wait "${active_pids[$p_idx]}" 2>/dev/null
+                    unset "active_pids[$p_idx]"
+                    active_pids=("${active_pids[@]}")
+                    completed=$((completed + 1))
+                    if [[ -t 1 ]]; then
+                        print_progress $completed $total "$(basename "${image_files[$idx]}")"
+                    fi
+                    break
+                fi
+            done
+            sleep 0.1
+        done
 
-#***** parse response *****
-if [[ "$http_code" -ne 200 ]]; then
-    error_msg=$(echo "$body" | python3 -c "
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    msg = data.get('error', {}).get('message', 'Unknown error')
-    print(msg)
-except:
-    print('HTTP $http_code')
-" 2>/dev/null)
-    print_error "API error: $error_msg"
-    exit 1
-fi
+        process_dir_image "$idx" &
+        active_pids+=($!)
+    done
 
-parsed=$(echo "$body" | python3 -c "
-import json, re, sys
-try:
-    data = json.load(sys.stdin)
-    content = data['choices'][0]['message']['content']
-    # try parsing content as JSON directly
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError:
-        # extract JSON from markdown fences
-        m = re.search(r'\`\`\`(?:json)?\s*(\{.*?\})\s*\`\`\`', content, re.DOTALL)
-        if m:
-            result = json.loads(m.group(1))
-        else:
-            # last resort: find first { ... }
-            m = re.search(r'\{.*\}', content, re.DOTALL)
-            if m:
-                result = json.loads(m.group(0))
-            else:
-                print(f'No JSON found in response', file=sys.stderr)
-                sys.exit(1)
-    name = result.get('name', '').strip()
-    description = result.get('description', '').strip()
-    if not name or not description:
-        print('Missing name or description in response', file=sys.stderr)
-        sys.exit(1)
-    print(name)
-    print(description)
-except Exception as e:
-    print(f'Failed to parse response: {e}', file=sys.stderr)
-    sys.exit(1)
-")
-
-if [[ $? -ne 0 ]]; then
-    print_error "Failed to parse API response"
-    exit 1
-fi
-
-peek_name=$(echo "$parsed" | head -1)
-peek_description=$(echo "$parsed" | tail -n +2)
-
-#***** output *****
-if [[ "$NAME_ONLY" == true ]]; then
-    echo "$peek_name"
-elif [[ -t 1 ]]; then
-    echo -e "  ${BOLD}Name:${RESET} $peek_name"
-    echo -e "  ${BOLD}Description:${RESET} $peek_description"
-    echo
+    # wait for remaining
+    for pid in "${active_pids[@]}"; do
+        wait "$pid" 2>/dev/null
+        completed=$((completed + 1))
+        if [[ -t 1 ]]; then
+            print_progress $completed $total ""
+        fi
+    done
 else
-    printf '%s\t%s\n' "$peek_name" "$peek_description"
+    #***** sequential processing *****
+    for ((idx=0; idx<total; idx++)); do
+        if [[ -t 1 ]]; then
+            print_progress $((idx + 1)) $total "$(basename "${image_files[$idx]}")"
+        fi
+        process_dir_image "$idx"
+    done
 fi
+
+if [[ -t 1 ]]; then
+    echo -ne "\r\033[K"  # clear progress line
+fi
+
+#***** print results summary *****
+renamed_count=$(grep -c "^RENAME" "$results_file" 2>/dev/null || echo 0)
+same_count=$(grep -c "^SAME" "$results_file" 2>/dev/null || echo 0)
+fail_count=$(grep -c "^FAIL" "$results_file" 2>/dev/null || echo 0)
+ok_count=$(grep -c "^OK" "$results_file" 2>/dev/null || echo 0)
+
+if [[ -t 1 ]]; then
+    echo
+    if [[ "$RENAME" == true ]]; then
+        # show renames
+        while IFS=$'\t' read -r status old new; do
+            if [[ "$status" == "RENAME" ]]; then
+                echo -e "  ${GREEN}✓${RESET} ${DIM}${old}${RESET} → ${BOLD}${new}${RESET}"
+            elif [[ "$status" == "SAME" ]]; then
+                echo -e "  ${DIM}· ${old} (unchanged)${RESET}"
+            elif [[ "$status" == "FAIL" ]]; then
+                echo -e "  ${RED}✗${RESET} ${old}"
+            fi
+        done < "$results_file"
+        echo
+        print_success "${renamed_count} renamed, ${same_count} unchanged, ${fail_count} failed"
+    else
+        # show descriptions
+        while IFS=$'\t' read -r status path rest; do
+            if [[ "$status" == "OK" ]]; then
+                echo -e "  ${BOLD}$(basename "$path")${RESET}: ${rest}"
+            elif [[ "$status" == "FAIL" ]]; then
+                echo -e "  ${RED}✗${RESET} $(basename "$path"): failed"
+            fi
+        done < "$results_file"
+        echo
+        print_success "${ok_count} processed, ${fail_count} failed"
+    fi
+    echo
+fi
+
+rm -f "$results_file"
