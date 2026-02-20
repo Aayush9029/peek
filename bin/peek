@@ -3,7 +3,7 @@
 #*** peek - describe images from the terminal using vision LLMs
 #***************************************************************************
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 #***** color scheme *****
 GREEN='\033[1;32m'
@@ -19,6 +19,7 @@ RESET='\033[0m'
 DEFAULT_MODEL="qwen32b"
 DEFAULT_DETAIL="normal"
 CONTEXT=""
+NAME_ONLY=false
 
 #***** model lookup (bash 3.2 compatible) *****
 resolve_model_id() {
@@ -34,9 +35,9 @@ resolve_model_id() {
 #***** detail prompt lookup *****
 resolve_detail_prompt() {
     case "$1" in
-        brief)    echo "Describe this image in 1-2 concise sentences." ;;
-        normal)   echo "Describe this image in a short paragraph, covering the key elements." ;;
-        detailed) echo "Provide a comprehensive description of this image, including details about composition, colors, text, objects, and context." ;;
+        brief)    echo 'Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<1-2 sentences>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
+        normal)   echo 'Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<short paragraph>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
+        detailed) echo 'Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<comprehensive description>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
         *)        return 1 ;;
     esac
 }
@@ -77,6 +78,7 @@ function show_help() {
     echo -e "    -m, --model <name>      Model shorthand (default: $DEFAULT_MODEL)"
     echo -e "    -d, --detail <level>    brief | normal | detailed (default: $DEFAULT_DETAIL)"
     echo -e "    -c, --context <text>    Context to guide the description"
+    echo -e "    --name-only             Print only the name (no description)"
     echo -e "    --list-models           List supported models"
     echo
     echo -e "${BLUE}EXAMPLES${RESET}"
@@ -84,6 +86,8 @@ function show_help() {
     echo -e "    ${DIM}peek shot.png -m qwen72b -d detailed${RESET}    ${DIM}# detailed with qwen 72B${RESET}"
     echo -e "    ${DIM}peek ui.png -c \"iOS settings screen\"${RESET}    ${DIM}# with context hint${RESET}"
     echo -e "    ${DIM}peek chart.png -d brief${RESET}                 ${DIM}# brief description${RESET}"
+    echo -e "    ${DIM}peek image.png --name-only${RESET}              ${DIM}# just the name${RESET}"
+    echo -e "    ${DIM}peek image.png | cut -f1${RESET}                ${DIM}# name from piped output${RESET}"
     echo
     echo -e "${DIM}Requires OPENROUTER_API_KEY environment variable.${RESET}"
     echo
@@ -128,6 +132,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --list-models)
             list_models
+            ;;
+        --name-only)
+            NAME_ONLY=true
+            shift
             ;;
         -m|--model)
             if [[ -z "$2" ]]; then
@@ -283,11 +291,34 @@ except:
     exit 1
 fi
 
-description=$(echo "$body" | python3 -c "
-import json, sys
+parsed=$(echo "$body" | python3 -c "
+import json, re, sys
 try:
     data = json.load(sys.stdin)
-    print(data['choices'][0]['message']['content'])
+    content = data['choices'][0]['message']['content']
+    # try parsing content as JSON directly
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        # extract JSON from markdown fences
+        m = re.search(r'\`\`\`(?:json)?\s*(\{.*?\})\s*\`\`\`', content, re.DOTALL)
+        if m:
+            result = json.loads(m.group(1))
+        else:
+            # last resort: find first { ... }
+            m = re.search(r'\{.*\}', content, re.DOTALL)
+            if m:
+                result = json.loads(m.group(0))
+            else:
+                print(f'No JSON found in response', file=sys.stderr)
+                sys.exit(1)
+    name = result.get('name', '').strip()
+    description = result.get('description', '').strip()
+    if not name or not description:
+        print('Missing name or description in response', file=sys.stderr)
+        sys.exit(1)
+    print(name)
+    print(description)
 except Exception as e:
     print(f'Failed to parse response: {e}', file=sys.stderr)
     sys.exit(1)
@@ -298,10 +329,16 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
+peek_name=$(echo "$parsed" | head -1)
+peek_description=$(echo "$parsed" | tail -n +2)
+
 #***** output *****
-if [[ -t 1 ]]; then
-    echo -e "  $description"
+if [[ "$NAME_ONLY" == true ]]; then
+    echo "$peek_name"
+elif [[ -t 1 ]]; then
+    echo -e "  ${BOLD}Name:${RESET} $peek_name"
+    echo -e "  ${BOLD}Description:${RESET} $peek_description"
     echo
 else
-    echo "$description"
+    printf '%s\t%s\n' "$peek_name" "$peek_description"
 fi
