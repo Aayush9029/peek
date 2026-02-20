@@ -23,8 +23,8 @@ CONTEXT=""
 #***** model lookup (bash 3.2 compatible) *****
 resolve_model_id() {
     case "$1" in
-        qwen32b)  echo "qwen/qwen2.5-vl-32b-instruct" ;;
-        qwen72b)  echo "qwen/qwen2.5-vl-72b-instruct" ;;
+        qwen32b)  echo "qwen/qwen3-vl-32b-instruct" ;;
+        qwen72b)  echo "qwen/qwen3-vl-235b-a22b-instruct" ;;
         llama11b) echo "meta-llama/llama-3.2-11b-vision-instruct" ;;
         gemma12b) echo "google/gemma-3-12b-it" ;;
         *)        return 1 ;;
@@ -105,8 +105,8 @@ function list_models() {
     echo
     echo -e "    ${BOLD}Shorthand     Model ID${RESET}"
     echo -e "    ${DIM}─────────     ────────────────────────────────────────${RESET}"
-    echo -e "    qwen32b       qwen/qwen2.5-vl-32b-instruct ${DIM}(default)${RESET}"
-    echo -e "    qwen72b       qwen/qwen2.5-vl-72b-instruct"
+    echo -e "    qwen32b       qwen/qwen3-vl-32b-instruct ${DIM}(default)${RESET}"
+    echo -e "    qwen72b       qwen/qwen3-vl-235b-a22b-instruct"
     echo -e "    llama11b      meta-llama/llama-3.2-11b-vision-instruct"
     echo -e "    gemma12b      google/gemma-3-12b-it"
     echo
@@ -244,7 +244,8 @@ payload = {
             {'type': 'image_url', 'image_url': {'url': 'data:' + sys.argv[3] + ';base64,' + sys.argv[4]}}
         ]
     }],
-    'max_tokens': 1024
+    'max_tokens': 1024,
+    'provider': {'allow_fallbacks': True}
 }
 print(json.dumps(payload))
 " "$model_id" "$system_prompt" "$mime_type" "$base64_data")
