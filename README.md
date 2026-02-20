@@ -40,8 +40,8 @@ peek --list-models                        # show supported models
 
 | Shorthand | Model |
 |-----------|-------|
-| `qwen32b` (default) | `qwen/qwen2.5-vl-32b-instruct` |
-| `qwen72b` | `qwen/qwen2.5-vl-72b-instruct` |
+| `qwen32b` (default) | `qwen/qwen3-vl-32b-instruct` |
+| `qwen72b` | `qwen/qwen3-vl-235b-a22b-instruct` |
 | `llama11b` | `meta-llama/llama-3.2-11b-vision-instruct` |
 | `gemma12b` | `google/gemma-3-12b-it` |
 
