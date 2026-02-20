@@ -3,7 +3,7 @@
 #*** peek - describe images from the terminal using vision LLMs
 #***************************************************************************
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 
 #***** color scheme *****
 GREEN='\033[1;32m'
@@ -20,9 +20,9 @@ DEFAULT_MODEL="qwen32b"
 DEFAULT_DETAIL="normal"
 CONTEXT=""
 NAME_ONLY=false
-RENAME=false
+RENAME="auto"
 RECURSIVE=false
-TIMESTAMP_CONTEXT=false
+TIMESTAMP_CONTEXT="auto"
 PARALLEL_JOBS=1
 
 #***** model lookup (bash 3.2 compatible) *****
@@ -103,18 +103,19 @@ function show_help() {
     echo -e "    --name-only               Print only the name (no description)"
     echo -e "    --list-models             List supported models"
     echo
-    echo -e "${BLUE}DIRECTORY OPTIONS${RESET}"
-    echo -e "    -r, --recursive           Recurse into subdirectories"
-    echo -e "    -j, --jobs <n>            Parallel jobs (default: 1)"
-    echo -e "    --rename                  Rename files to their peek names"
-    echo -e "    --timestamp-context       Auto-add timestamp and neighbor context"
+    echo -e "${BLUE}DIRECTORY OPTIONS${RESET} ${DIM}(rename + timestamp context enabled by default)${RESET}"
+    echo -e "    -r, --recursive             Recurse into subdirectories"
+    echo -e "    -j, --jobs <n>              Parallel jobs (default: 1)"
+    echo -e "    --no-rename                 Don't rename files (just describe)"
+    echo -e "    --no-timestamp-context      Don't add timestamp/neighbor context"
     echo
     echo -e "${BLUE}EXAMPLES${RESET}"
-    echo -e "    ${DIM}peek photo.png${RESET}                                  ${DIM}# describe single image${RESET}"
-    echo -e "    ${DIM}peek shot.png -m qwen72b -d detailed${RESET}            ${DIM}# detailed with qwen 72B${RESET}"
-    echo -e "    ${DIM}peek ui.png -c \"iOS settings screen\"${RESET}            ${DIM}# with context hint${RESET}"
-    echo -e "    ${DIM}peek ./screenshots --rename --timestamp-context${RESET}  ${DIM}# rename a directory${RESET}"
-    echo -e "    ${DIM}peek ./images -r -j 4 --name-only${RESET}              ${DIM}# parallel recursive${RESET}"
+    echo -e "    ${DIM}peek photo.png${RESET}                          ${DIM}# describe single image${RESET}"
+    echo -e "    ${DIM}peek shot.png -m qwen72b -d detailed${RESET}    ${DIM}# detailed with qwen 72B${RESET}"
+    echo -e "    ${DIM}peek ui.png -c \"iOS settings screen\"${RESET}    ${DIM}# with context hint${RESET}"
+    echo -e "    ${DIM}peek ./screenshots${RESET}                      ${DIM}# rename dir (default)${RESET}"
+    echo -e "    ${DIM}peek ./screenshots --no-rename${RESET}          ${DIM}# describe only, no rename${RESET}"
+    echo -e "    ${DIM}peek ./images -r -j 4${RESET}                   ${DIM}# parallel recursive${RESET}"
     echo
     echo -e "${DIM}Requires OPENROUTER_API_KEY environment variable.${RESET}"
     echo
@@ -294,7 +295,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rename)
             RENAME=true
-            NAME_ONLY=true
+            shift
+            ;;
+        --no-rename)
+            RENAME=false
             shift
             ;;
         --recursive|-r)
@@ -303,6 +307,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --timestamp-context)
             TIMESTAMP_CONTEXT=true
+            shift
+            ;;
+        --no-timestamp-context)
+            TIMESTAMP_CONTEXT=false
             shift
             ;;
         -j|--jobs)
@@ -378,6 +386,22 @@ if [[ -z "$OPENROUTER_API_KEY" ]]; then
     print_error "OPENROUTER_API_KEY environment variable not set"
     echo -e "${DIM}Get a key at https://openrouter.ai/keys${RESET}" >&2
     exit 1
+fi
+
+#***** resolve "auto" defaults based on target type *****
+if [[ -f "$target_path" ]]; then
+    # single file: auto → off
+    [[ "$RENAME" == "auto" ]] && RENAME=false
+    [[ "$TIMESTAMP_CONTEXT" == "auto" ]] && TIMESTAMP_CONTEXT=false
+elif [[ -d "$target_path" ]]; then
+    # directory: auto → on
+    [[ "$RENAME" == "auto" ]] && RENAME=true
+    [[ "$TIMESTAMP_CONTEXT" == "auto" ]] && TIMESTAMP_CONTEXT=true
+fi
+
+# rename implies name-only output
+if [[ "$RENAME" == true ]]; then
+    NAME_ONLY=true
 fi
 
 #***** single file mode *****
