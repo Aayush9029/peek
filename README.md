@@ -72,3 +72,7 @@ peek ./photos --no-timestamp-context  # skip timestamp/neighbor context
 | `qwen72b` | `qwen/qwen3-vl-235b-a22b-instruct` |
 | `llama11b` | `meta-llama/llama-3.2-11b-vision-instruct` |
 | `gemma12b` | `google/gemma-3-12b-it` |
+
+---
+
+*More CLI tools: [`brew tap aayush9029/tap`](https://github.com/Aayush9029/homebrew-tap)*
