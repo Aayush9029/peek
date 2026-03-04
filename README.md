@@ -41,12 +41,12 @@ peek image.png | cut -f2    # just the description
 
 ## Directory Mode
 
-Pass a directory to batch-rename files using vision. Rename and timestamp context are enabled by default.
+Pass a directory to describe all images. Use `--rename` to also rename files.
 
 ```bash
-peek ./screenshots                  # rename all images in dir
-peek ./screenshots --no-rename      # describe only, no rename
-peek ./images -r -j 4               # parallel recursive
+peek ./screenshots                    # describe all images in dir
+peek ./screenshots --rename           # describe + rename files
+peek ./images -r -j 4                 # parallel recursive
 peek ./photos --no-timestamp-context  # skip timestamp/neighbor context
 ```
 
@@ -61,7 +61,7 @@ peek ./photos --no-timestamp-context  # skip timestamp/neighbor context
 | `--list-models` | List supported models | |
 | `-r, --recursive` | Recurse into subdirectories | |
 | `-j, --jobs <n>` | Parallel jobs | `1` |
-| `--no-rename` | Don't rename files (describe only) | |
+| `--rename` | Rename files based on description | |
 | `--no-timestamp-context` | Skip timestamp/neighbor context | |
 
 ## Models

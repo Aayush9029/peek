@@ -20,7 +20,7 @@ DEFAULT_MODEL="qwen32b"
 DEFAULT_DETAIL="normal"
 CONTEXT=""
 NAME_ONLY=false
-RENAME="auto"
+RENAME=false
 RECURSIVE=false
 TIMESTAMP_CONTEXT="auto"
 PARALLEL_JOBS=1
@@ -390,12 +390,8 @@ fi
 
 #***** resolve "auto" defaults based on target type *****
 if [[ -f "$target_path" ]]; then
-    # single file: auto → off
-    [[ "$RENAME" == "auto" ]] && RENAME=false
     [[ "$TIMESTAMP_CONTEXT" == "auto" ]] && TIMESTAMP_CONTEXT=false
 elif [[ -d "$target_path" ]]; then
-    # directory: auto → on
-    [[ "$RENAME" == "auto" ]] && RENAME=true
     [[ "$TIMESTAMP_CONTEXT" == "auto" ]] && TIMESTAMP_CONTEXT=true
 fi
 
