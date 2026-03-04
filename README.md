@@ -1,6 +1,6 @@
 # peek
 
-Describe and rename images from the terminal using vision LLMs.
+Describe images from the terminal using vision LLMs.
 
 ## Install
 
@@ -8,70 +8,25 @@ Describe and rename images from the terminal using vision LLMs.
 brew install aayush9029/tap/peek
 ```
 
-Requires `OPENROUTER_API_KEY` environment variable ([get one](https://openrouter.ai/keys)).
+Requires `OPENROUTER_API_KEY` ([get one](https://openrouter.ai/keys)).
 
 ## Usage
 
 ```bash
-# Describe a single image
-peek photo.png
+peek photo.png                          # describe an image
+peek shot.png -m qwen72b -d detailed    # larger model, detailed description
+peek ui.png -c "iOS settings screen"    # with context hint
+peek chart.png -d brief                 # brief description
+peek image.png --name-only              # just the name
+peek --list-models                      # list available models
 
-# Detailed description with a larger model
-peek shot.png -m qwen72b -d detailed
-
-# With context hint
-peek ui.png -c "iOS settings screen"
-
-# Brief description
-peek chart.png -d brief
-
-# Just the name (no description)
-peek image.png --name-only
-
-# List available models
-peek --list-models
+# directory mode
+peek ./screenshots                      # describe all images in dir
+peek ./screenshots --rename             # describe + rename files
+peek ./images -r -j 4                   # parallel recursive
 ```
 
-Piped output is tab-separated (`name\tdescription`):
-
-```bash
-peek image.png | cut -f1    # just the name
-peek image.png | cut -f2    # just the description
-```
-
-## Directory Mode
-
-Pass a directory to describe all images. Use `--rename` to also rename files.
-
-```bash
-peek ./screenshots                    # describe all images in dir
-peek ./screenshots --rename           # describe + rename files
-peek ./images -r -j 4                 # parallel recursive
-peek ./photos --no-timestamp-context  # skip timestamp/neighbor context
-```
-
-## Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-m, --model <name>` | Model shorthand | `qwen32b` |
-| `-d, --detail <level>` | `brief` \| `normal` \| `detailed` | `normal` |
-| `-c, --context <text>` | Context to guide the description | |
-| `--name-only` | Print only the name | |
-| `--list-models` | List supported models | |
-| `-r, --recursive` | Recurse into subdirectories | |
-| `-j, --jobs <n>` | Parallel jobs | `1` |
-| `--rename` | Rename files based on description | |
-| `--no-timestamp-context` | Skip timestamp/neighbor context | |
-
-## Models
-
-| Shorthand | Model |
-|-----------|-------|
-| `qwen32b` (default) | `qwen/qwen3-vl-32b-instruct` |
-| `qwen72b` | `qwen/qwen3-vl-235b-a22b-instruct` |
-| `llama11b` | `meta-llama/llama-3.2-11b-vision-instruct` |
-| `gemma12b` | `google/gemma-3-12b-it` |
+Piped output is tab-separated (`name\tdescription`).
 
 ---
 
