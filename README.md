@@ -1,3 +1,5 @@
+<img src="assets/icon.png" width="128" alt="peek">
+
 # peek
 
 Describe images from the terminal using vision LLMs.
