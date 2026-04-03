@@ -2,7 +2,7 @@
 
 # peek
 
-Describe images from the terminal using vision LLMs.
+Describe images and videos from the terminal using vision LLMs.
 
 ## Install
 
@@ -11,21 +11,23 @@ brew install aayush9029/tap/peek
 ```
 
 Requires `OPENROUTER_API_KEY` ([get one](https://openrouter.ai/keys)).
+Video support requires `ffmpeg` (`brew install ffmpeg`).
 
 ## Usage
 
 ```bash
 peek photo.png                          # describe an image
+peek clip.mp4                           # describe a video
+peek demo.mov --frames 10              # video with 10 frames
 peek shot.png -m qwen72b -d detailed    # larger model, detailed description
 peek ui.png -c "iOS settings screen"    # with context hint
-peek chart.png -d brief                 # brief description
 peek image.png --name-only              # just the name
 peek --list-models                      # list available models
 
-# directory mode
-peek ./screenshots                      # describe all images in dir
+# directory mode (images + videos)
+peek ./screenshots                      # describe all files in dir
 peek ./screenshots --rename             # describe + rename files
-peek ./images -r -j 4                   # parallel recursive
+peek ./media -r -j 4                   # parallel recursive
 ```
 
 Piped output is tab-separated (`name\tdescription`).

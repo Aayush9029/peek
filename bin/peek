@@ -3,7 +3,7 @@
 #*** peek - describe images from the terminal using vision LLMs
 #***************************************************************************
 
-VERSION="0.3.1"
+VERSION="0.4.0"
 
 #***** color scheme *****
 GREEN='\033[1;32m'
@@ -24,6 +24,8 @@ RENAME=false
 RECURSIVE=false
 TIMESTAMP_CONTEXT="auto"
 PARALLEL_JOBS=1
+DEFAULT_FRAMES=6
+FRAME_COUNT="$DEFAULT_FRAMES"
 
 #***** model lookup (bash 3.2 compatible) *****
 resolve_model_id() {
@@ -42,6 +44,16 @@ resolve_detail_prompt() {
         brief)    echo 'Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<1-2 sentences>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
         normal)   echo 'Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<short paragraph>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
         detailed) echo 'Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<comprehensive description>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
+        *)        return 1 ;;
+    esac
+}
+
+#***** video detail prompt lookup *****
+resolve_video_detail_prompt() {
+    case "$1" in
+        brief)    echo 'You are viewing evenly-spaced frames extracted from a video. Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<1-2 sentences summarizing the video content>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
+        normal)   echo 'You are viewing evenly-spaced frames extracted from a video. Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<short paragraph summarizing what happens in the video>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
+        detailed) echo 'You are viewing evenly-spaced frames extracted from a video. Respond with JSON: {"name": "<2-3 word dash-separated name>", "description": "<comprehensive description of the video content, including what happens, visual style, and key moments>"}. The name should be lowercase, filename-safe, max 3 words.' ;;
         *)        return 1 ;;
     esac
 }
@@ -89,10 +101,10 @@ print_progress() {
 function show_help() {
     echo
     print_header
-    echo -e "  ${DIM}describe images using vision LLMs${RESET}"
+    echo -e "  ${DIM}describe images and videos using vision LLMs${RESET}"
     echo
     echo -e "${BLUE}USAGE${RESET}"
-    echo -e "    peek <image-or-dir> [options]"
+    echo -e "    peek <file-or-dir> [options]"
     echo
     echo -e "${BLUE}OPTIONS${RESET}"
     echo -e "    -h, --help                Show this help"
@@ -103,6 +115,9 @@ function show_help() {
     echo -e "    --name-only               Print only the name (no description)"
     echo -e "    --list-models             List supported models"
     echo
+    echo -e "${BLUE}VIDEO OPTIONS${RESET} ${DIM}(requires ffmpeg)${RESET}"
+    echo -e "    --frames <n>                Frames to extract (default: $DEFAULT_FRAMES, range: 1-20)"
+    echo
     echo -e "${BLUE}DIRECTORY OPTIONS${RESET} ${DIM}(rename + timestamp context enabled by default)${RESET}"
     echo -e "    -r, --recursive             Recurse into subdirectories"
     echo -e "    -j, --jobs <n>              Parallel jobs (default: 1)"
@@ -111,6 +126,8 @@ function show_help() {
     echo
     echo -e "${BLUE}EXAMPLES${RESET}"
     echo -e "    ${DIM}peek photo.png${RESET}                          ${DIM}# describe single image${RESET}"
+    echo -e "    ${DIM}peek clip.mp4${RESET}                           ${DIM}# describe a video${RESET}"
+    echo -e "    ${DIM}peek demo.mov --frames 10${RESET}               ${DIM}# video with 10 frames${RESET}"
     echo -e "    ${DIM}peek shot.png -m qwen72b -d detailed${RESET}    ${DIM}# detailed with qwen 72B${RESET}"
     echo -e "    ${DIM}peek ui.png -c \"iOS settings screen\"${RESET}    ${DIM}# with context hint${RESET}"
     echo -e "    ${DIM}peek ./screenshots${RESET}                      ${DIM}# rename dir (default)${RESET}"
@@ -118,6 +135,7 @@ function show_help() {
     echo -e "    ${DIM}peek ./images -r -j 4${RESET}                   ${DIM}# parallel recursive${RESET}"
     echo
     echo -e "${DIM}Requires OPENROUTER_API_KEY environment variable.${RESET}"
+    echo -e "${DIM}Video support requires ffmpeg (brew install ffmpeg).${RESET}"
     echo
     exit 0
 }
@@ -273,6 +291,217 @@ except Exception as e:
     return 0
 }
 
+#***** video helpers *****
+is_video_file() {
+    local ext="${1##*.}"
+    ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+    case "$ext" in
+        mp4|mov|webm|mkv|avi|m4v) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_ffmpeg() {
+    if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+        print_error "ffmpeg/ffprobe required for video files but not found"
+        echo -e "${DIM}Install with: brew install ffmpeg${RESET}" >&2
+        return 1
+    fi
+}
+
+#***** process a single video (extract frames → multi-image LLM call) *****
+process_video() {
+    local video_path="$1"
+    local model_id="$2"
+    local system_prompt="$3"
+    local extra_context="$4"
+    local frame_count="$5"
+
+    require_ffmpeg || return 1
+
+    #-- create temp dir for frames --
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    #-- get video duration --
+    local duration
+    duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$video_path" 2>/dev/null)
+    if [[ -z "$duration" || "$duration" == "N/A" ]]; then
+        print_error "Could not determine video duration: $video_path"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    #-- extract evenly-spaced frames (auto-reduce for short videos) --
+    python3 -c "
+import sys, subprocess
+dur = float(sys.argv[1])
+requested = int(sys.argv[2])
+tmp = sys.argv[3]
+video = sys.argv[4]
+n = min(requested, max(1, int(dur / 0.5)))
+for i in range(n):
+    t = (dur * i) / n if n > 1 else dur / 2
+    out = f'{tmp}/frame_{i:03d}.jpg'
+    subprocess.run([
+        'ffmpeg', '-ss', str(t), '-i', video,
+        '-frames:v', '1', '-q:v', '2',
+        '-vf', \"scale='min(1280,iw)':-2\",
+        '-y', out
+    ], capture_output=True)
+" "$duration" "$frame_count" "$tmp_dir" "$video_path"
+
+    #-- verify we got frames --
+    local frame_files=()
+    while IFS= read -r -d '' ff; do
+        frame_files+=("$ff")
+    done < <(find "$tmp_dir" -name "frame_*.jpg" -print0 | sort -z)
+
+    if [[ ${#frame_files[@]} -eq 0 ]]; then
+        print_error "Failed to extract frames from: $video_path"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    #-- build full prompt --
+    local full_prompt="$system_prompt"
+    if [[ -n "$extra_context" ]]; then
+        full_prompt="${full_prompt} Context: ${extra_context}"
+    fi
+
+    #-- build multi-image JSON payload --
+    local manifest_file payload_file
+    manifest_file=$(mktemp)
+    payload_file=$(mktemp)
+
+    for ff in "${frame_files[@]}"; do
+        base64 -i "$ff" | tr -d '\n'
+        echo
+    done > "$manifest_file"
+
+    python3 -c "
+import json, sys
+model = sys.argv[1]
+prompt = sys.argv[2]
+manifest = sys.argv[3]
+content = [{'type': 'text', 'text': prompt}]
+with open(manifest) as f:
+    for line in f:
+        b64 = line.strip()
+        if b64:
+            content.append({
+                'type': 'image_url',
+                'image_url': {'url': 'data:image/jpeg;base64,' + b64}
+            })
+payload = {
+    'model': model,
+    'messages': [{'role': 'user', 'content': content}],
+    'max_tokens': 1024,
+    'provider': {'allow_fallbacks': True}
+}
+print(json.dumps(payload))
+" "$model_id" "$full_prompt" "$manifest_file" > "$payload_file"
+
+    rm -f "$manifest_file"
+    rm -rf "$tmp_dir"
+
+    #-- call OpenRouter API --
+    local response http_code body
+    response=$(curl -s -w "\n%{http_code}" \
+        -X POST "https://openrouter.ai/api/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+        -d @"$payload_file")
+
+    rm -f "$payload_file"
+
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+
+    #-- parse response (same as process_image) --
+    if [[ "$http_code" -ne 200 ]]; then
+        local error_msg
+        error_msg=$(echo "$body" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    msg = data.get('error', {}).get('message', 'Unknown error')
+    print(msg)
+except:
+    print('HTTP $http_code')
+" 2>/dev/null)
+        print_error "API error: $error_msg ($video_path)"
+        return 1
+    fi
+
+    local parsed
+    parsed=$(echo "$body" | python3 -c "
+import json, re, sys
+try:
+    data = json.load(sys.stdin)
+    content = data['choices'][0]['message']['content']
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        m = re.search(r'\`\`\`(?:json)?\s*(\{.*?\})\s*\`\`\`', content, re.DOTALL)
+        if m:
+            result = json.loads(m.group(1))
+        else:
+            m = re.search(r'\{.*\}', content, re.DOTALL)
+            if m:
+                result = json.loads(m.group(0))
+            else:
+                print(f'No JSON found in response', file=sys.stderr)
+                sys.exit(1)
+    name = result.get('name', '').strip()
+    description = result.get('description', '').strip()
+    if not name or not description:
+        print('Missing name or description in response', file=sys.stderr)
+        sys.exit(1)
+    print(name)
+    print(description)
+except Exception as e:
+    print(f'Failed to parse response: {e}', file=sys.stderr)
+    sys.exit(1)
+")
+
+    if [[ $? -ne 0 ]]; then
+        print_error "Failed to parse API response ($video_path)"
+        return 1
+    fi
+
+    local peek_name peek_description
+    peek_name=$(echo "$parsed" | head -1)
+    peek_description=$(echo "$parsed" | tail -n +2)
+
+    if [[ "$NAME_ONLY" == true ]]; then
+        echo "$peek_name"
+    elif [[ -t 1 ]]; then
+        echo -e "  ${BOLD}Name:${RESET} $peek_name"
+        echo -e "  ${BOLD}Description:${RESET} $peek_description"
+    else
+        printf '%s\t%s\n' "$peek_name" "$peek_description"
+    fi
+
+    return 0
+}
+
+#***** file dispatcher (image or video) *****
+process_file() {
+    local file_path="$1"
+    local model_id="$2"
+    local system_prompt="$3"
+    local extra_context="$4"
+
+    if is_video_file "$file_path"; then
+        local video_prompt
+        video_prompt=$(resolve_video_detail_prompt "$detail")
+        process_video "$file_path" "$model_id" "$video_prompt" "$extra_context" "$FRAME_COUNT"
+    else
+        process_image "$file_path" "$model_id" "$system_prompt" "$extra_context"
+    fi
+}
+
 #***** parse arguments *****
 model="$DEFAULT_MODEL"
 detail="$DEFAULT_DETAIL"
@@ -312,6 +541,18 @@ while [[ $# -gt 0 ]]; do
         --no-timestamp-context)
             TIMESTAMP_CONTEXT=false
             shift
+            ;;
+        --frames)
+            if [[ -z "$2" ]]; then
+                print_error "--frames requires a number (1-20)"
+                exit 1
+            fi
+            FRAME_COUNT="$2"
+            if [[ "$FRAME_COUNT" -lt 1 || "$FRAME_COUNT" -gt 20 ]] 2>/dev/null; then
+                print_error "--frames must be between 1 and 20"
+                exit 1
+            fi
+            shift 2
             ;;
         -j|--jobs)
             if [[ -z "$2" ]]; then
@@ -364,8 +605,8 @@ done
 
 #***** validate inputs *****
 if [[ -z "$target_path" ]]; then
-    print_error "No image or directory path provided"
-    echo -e "${DIM}Usage: peek <image-or-dir> [options]${RESET}" >&2
+    print_error "No file or directory path provided"
+    echo -e "${DIM}Usage: peek <file-or-dir> [options]${RESET}" >&2
     exit 1
 fi
 
@@ -402,21 +643,24 @@ fi
 
 #***** single file mode *****
 if [[ -f "$target_path" ]]; then
+    file_label="Image"
+    is_video_file "$target_path" && file_label="Video"
     if [[ -t 1 ]]; then
         echo
         print_header
         print_dim "v${VERSION} · https://github.com/Aayush9029/peek"
         echo
-        print_status "Image: ${BOLD}$(basename "$target_path")${RESET}"
+        print_status "${file_label}: ${BOLD}$(basename "$target_path")${RESET}"
         print_status "Model: ${BOLD}${model}${RESET} ${DIM}(${model_id})${RESET}"
         print_status "Detail: ${BOLD}${detail}${RESET}"
         [[ -n "$CONTEXT" ]] && print_status "Context: ${BOLD}${CONTEXT}${RESET}"
+        [[ "$file_label" == "Video" ]] && print_status "Frames: ${BOLD}${FRAME_COUNT}${RESET}"
         echo
         echo -ne "  ${YELLOW}⏳${RESET} Thinking..."
     fi
 
     extra_context="$CONTEXT"
-    result=$(process_image "$target_path" "$model_id" "$system_prompt" "$extra_context")
+    result=$(process_file "$target_path" "$model_id" "$system_prompt" "$extra_context")
     exit_code=$?
 
     if [[ -t 1 ]]; then
@@ -462,21 +706,21 @@ if [[ ! -d "$target_path" ]]; then
     exit 1
 fi
 
-# collect image files
+# collect image and video files
 image_files=()
 if [[ "$RECURSIVE" == true ]]; then
     while IFS= read -r -d '' f; do
         image_files+=("$f")
-    done < <(find "$target_path" -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.gif" -o -iname "*.webp" \) -print0 | sort -z)
+    done < <(find "$target_path" -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.gif" -o -iname "*.webp" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.webm" -o -iname "*.mkv" -o -iname "*.avi" -o -iname "*.m4v" \) -print0 | sort -z)
 else
     while IFS= read -r -d '' f; do
         image_files+=("$f")
-    done < <(find "$target_path" -maxdepth 1 -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.gif" -o -iname "*.webp" \) -print0 | sort -z)
+    done < <(find "$target_path" -maxdepth 1 -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.gif" -o -iname "*.webp" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.webm" -o -iname "*.mkv" -o -iname "*.avi" -o -iname "*.m4v" \) -print0 | sort -z)
 fi
 
 total=${#image_files[@]}
 if [[ $total -eq 0 ]]; then
-    print_error "No images found in $target_path"
+    print_error "No images or videos found in $target_path"
     exit 1
 fi
 
@@ -494,7 +738,7 @@ if [[ -t 1 ]]; then
     print_dim "v${VERSION} · https://github.com/Aayush9029/peek"
     echo
     print_status "Directory: ${BOLD}${target_path}${RESET}"
-    print_status "Images: ${BOLD}${total}${RESET}"
+    print_status "Files: ${BOLD}${total}${RESET}"
     print_status "Model: ${BOLD}${model}${RESET} ${DIM}(${model_id})${RESET}"
     print_status "Jobs: ${BOLD}${PARALLEL_JOBS}${RESET}"
     [[ "$RENAME" == true ]] && print_status "Mode: ${BOLD}rename${RESET}"
@@ -540,7 +784,7 @@ process_dir_image() {
     fi
 
     local result
-    result=$(process_image "$f" "$model_id" "$system_prompt" "$extra_context")
+    result=$(process_file "$f" "$model_id" "$system_prompt" "$extra_context")
     local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
