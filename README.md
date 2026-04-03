@@ -1,15 +1,29 @@
-<img src="assets/icon.png" width="128" alt="peek">
+<p align="center">
+  <img src="assets/icon.png" width="128" alt="peek">
+  <h1 align="center">peek</h1>
+  <p align="center">Describe images and videos from the terminal using vision LLMs</p>
+</p>
 
-# peek
+<p align="center">
+  <a href="https://github.com/Aayush9029/peek/releases/latest"><img src="https://img.shields.io/github/v/release/Aayush9029/peek" alt="Release"></a>
+  <a href="https://github.com/Aayush9029/peek/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Aayush9029/peek" alt="License"></a>
+</p>
 
-Describe images and videos from the terminal using vision LLMs.
-
-<p align="center"><img src="assets/demo.gif" alt="peek demo" width="800"></p>
+<p align="center">
+  <img src="assets/demo.gif" alt="peek demo" width="800">
+</p>
 
 ## Install
 
 ```bash
 brew install aayush9029/tap/peek
+```
+
+Or tap first:
+
+```bash
+brew tap aayush9029/tap
+brew install peek
 ```
 
 Requires `OPENROUTER_API_KEY` ([get one](https://openrouter.ai/keys)).
@@ -34,6 +48,6 @@ peek ./media -r -j 4                   # parallel recursive
 
 Piped output is tab-separated (`name\tdescription`).
 
----
+## License
 
-*More CLI tools: [`brew tap aayush9029/tap`](https://github.com/Aayush9029/homebrew-tap)*
+MIT
