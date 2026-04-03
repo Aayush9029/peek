@@ -4,6 +4,8 @@
 
 Describe images and videos from the terminal using vision LLMs.
 
+<p align="center"><img src="assets/demo.gif" alt="peek demo" width="800"></p>
+
 ## Install
 
 ```bash
