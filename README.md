@@ -40,6 +40,11 @@ peek ui.png -c "iOS settings screen"    # with context hint
 peek image.png --name-only              # just the name
 peek --list-models                      # list available models
 
+# image compression (on by default — saves tokens)
+peek photo.png --raw                    # send original (no compression)
+peek photo.png --max-width 800          # custom max width
+peek photo.png --quality 40             # lower quality, smaller payload
+
 # directory mode (images + videos)
 peek ./screenshots                      # describe all files in dir
 peek ./screenshots --rename             # describe + rename files

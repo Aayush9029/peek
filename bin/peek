@@ -3,7 +3,7 @@
 #*** peek - describe images from the terminal using vision LLMs
 #***************************************************************************
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 
 #***** color scheme *****
 GREEN='\033[1;32m'
@@ -26,6 +26,9 @@ TIMESTAMP_CONTEXT="auto"
 PARALLEL_JOBS=1
 DEFAULT_FRAMES=6
 FRAME_COUNT="$DEFAULT_FRAMES"
+RAW_MODE=false
+MAX_WIDTH=1280
+JPEG_QUALITY=60
 
 #***** model lookup (bash 3.2 compatible) *****
 resolve_model_id() {
@@ -115,6 +118,11 @@ function show_help() {
     echo -e "    --name-only               Print only the name (no description)"
     echo -e "    --list-models             List supported models"
     echo
+    echo -e "${BLUE}IMAGE COMPRESSION${RESET} ${DIM}(on by default — saves tokens)${RESET}"
+    echo -e "    --raw                       Send original image (no compression/resize)"
+    echo -e "    --max-width <px>            Max width before resize (default: $MAX_WIDTH)"
+    echo -e "    --quality <1-100>           JPEG quality (default: $JPEG_QUALITY)"
+    echo
     echo -e "${BLUE}VIDEO OPTIONS${RESET} ${DIM}(requires ffmpeg)${RESET}"
     echo -e "    --frames <n>                Frames to extract (default: $DEFAULT_FRAMES, range: 1-20)"
     echo
@@ -163,6 +171,35 @@ function list_models() {
     exit 0
 }
 
+#***** compress/resize image for API (saves tokens) *****
+prepare_image() {
+    local image_path="$1"
+
+    if [[ "$RAW_MODE" == true ]]; then
+        echo "$image_path"
+        return 0
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp /tmp/peek_XXXXXX.jpg)
+
+    local current_width
+    current_width=$(sips -g pixelWidth "$image_path" 2>/dev/null | tail -1 | awk '{print $2}')
+
+    if [[ -n "$current_width" && "$current_width" -gt "$MAX_WIDTH" ]]; then
+        sips --resampleWidth "$MAX_WIDTH" --setProperty format jpeg --setProperty formatOptions "$JPEG_QUALITY" "$image_path" --out "$tmp_file" >/dev/null 2>&1
+    else
+        sips --setProperty format jpeg --setProperty formatOptions "$JPEG_QUALITY" "$image_path" --out "$tmp_file" >/dev/null 2>&1
+    fi
+
+    if [[ $? -eq 0 && -s "$tmp_file" ]]; then
+        echo "$tmp_file"
+    else
+        rm -f "$tmp_file"
+        echo "$image_path"
+    fi
+}
+
 #***** process a single image (core logic) *****
 process_image() {
     local image_path="$1"
@@ -171,15 +208,28 @@ process_image() {
     local extra_context="$4"
 
     #-- detect MIME type --
-    local mime_type
-    mime_type=$(file --mime-type -b "$image_path")
-    case "$mime_type" in
+    local orig_mime
+    orig_mime=$(file --mime-type -b "$image_path")
+    case "$orig_mime" in
         image/png|image/jpeg|image/gif|image/webp) ;;
         *)
-            print_error "Unsupported image type: $mime_type ($image_path)"
+            print_error "Unsupported image type: $orig_mime ($image_path)"
             return 1
             ;;
     esac
+
+    #-- compress/resize for API --
+    local processed_path
+    processed_path=$(prepare_image "$image_path")
+    local is_temp=false
+    [[ "$processed_path" != "$image_path" ]] && is_temp=true
+
+    local mime_type
+    if [[ "$is_temp" == true ]]; then
+        mime_type="image/jpeg"
+    else
+        mime_type="$orig_mime"
+    fi
 
     #-- build full prompt --
     local full_prompt="$system_prompt"
@@ -191,7 +241,7 @@ process_image() {
     local payload_file
     payload_file=$(mktemp)
 
-    base64 -i "$image_path" | python3 -c "
+    base64 -i "$processed_path" | python3 -c "
 import json, sys
 b64 = sys.stdin.read().replace('\n', '')
 payload = {
@@ -208,6 +258,8 @@ payload = {
 }
 print(json.dumps(payload))
 " "$model_id" "$full_prompt" "$mime_type" > "$payload_file"
+
+    [[ "$is_temp" == true ]] && rm -f "$processed_path"
 
     #-- call OpenRouter API --
     local response http_code body
@@ -518,6 +570,26 @@ while [[ $# -gt 0 ]]; do
         --list-models)
             list_models
             ;;
+        --raw)
+            RAW_MODE=true
+            shift
+            ;;
+        --max-width)
+            if [[ -z "$2" ]]; then
+                print_error "--max-width requires a number"
+                exit 1
+            fi
+            MAX_WIDTH="$2"
+            shift 2
+            ;;
+        --quality)
+            if [[ -z "$2" ]]; then
+                print_error "--quality requires a number (1-100)"
+                exit 1
+            fi
+            JPEG_QUALITY="$2"
+            shift 2
+            ;;
         --name-only)
             NAME_ONLY=true
             shift
@@ -653,6 +725,11 @@ if [[ -f "$target_path" ]]; then
         print_status "${file_label}: ${BOLD}$(basename "$target_path")${RESET}"
         print_status "Model: ${BOLD}${model}${RESET} ${DIM}(${model_id})${RESET}"
         print_status "Detail: ${BOLD}${detail}${RESET}"
+        if [[ "$RAW_MODE" == true ]]; then
+            print_status "Compression: ${BOLD}off${RESET} ${DIM}(raw)${RESET}"
+        else
+            print_status "Compression: ${BOLD}JPEG q${JPEG_QUALITY}${RESET} ${DIM}(max ${MAX_WIDTH}px)${RESET}"
+        fi
         [[ -n "$CONTEXT" ]] && print_status "Context: ${BOLD}${CONTEXT}${RESET}"
         [[ "$file_label" == "Video" ]] && print_status "Frames: ${BOLD}${FRAME_COUNT}${RESET}"
         echo
